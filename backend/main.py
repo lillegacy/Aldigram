@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+from .cognitive_search import CognitiveSearchEngine
 from .iact_engine import DEFAULT_THRESHOLD, MODEL_NAME, MultiLingualIACTEngine
 
 logger = logging.getLogger("iact.backend")
@@ -149,6 +150,18 @@ class CommandIn(BaseModel):
     command: str = Field(min_length=1, max_length=500)
 
 
+class SearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=5, ge=1, le=20)
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class QAIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    top_k: int = Field(default=3, ge=1, le=10)
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class ConceptStore:
     """Thread-safe in-memory concept knowledge base."""
 
@@ -156,6 +169,13 @@ class ConceptStore:
         self._concepts: dict[str, dict] = {}
         self._order: list[str] = []
         self._lock = Lock()
+        self._version = 0
+
+    @property
+    def version(self) -> int:
+        """Monotonic counter bumped on every mutation (used by search index)."""
+        with self._lock:
+            return self._version
 
     def upsert(self, concept: ConceptIn) -> dict:
         title = concept.title.strip()
@@ -170,6 +190,7 @@ class ConceptStore:
             if title not in self._concepts:
                 self._order.append(title)
             self._concepts[title] = record
+            self._version += 1
         return record
 
     def delete(self, title: str) -> bool:
@@ -178,6 +199,7 @@ class ConceptStore:
                 return False
             del self._concepts[title]
             self._order.remove(title)
+            self._version += 1
             return True
 
     def search(self, query: str) -> list[dict]:
@@ -192,9 +214,11 @@ class ConceptStore:
                     results.append(dict(record))
             return results
 
-    def with_links(self) -> list[dict]:
+    def snapshot(self) -> tuple[list[dict], int]:
+        """Return the linked network plus the store version, atomically."""
         with self._lock:
             records = [dict(record) for record in self._concepts.values()]
+            version = self._version
         keyword_sets = {
             record["concept"]: {keyword.lower() for keyword in record["keywords"]}
             for record in records
@@ -209,7 +233,10 @@ class ConceptStore:
                 and keyword_sets[title] & keyword_sets[other["concept"]]
             ]
             network.append({**record, "links": links})
-        return network
+        return network, version
+
+    def with_links(self) -> list[dict]:
+        return self.snapshot()[0]
 
     def __len__(self) -> int:
         with self._lock:
@@ -223,6 +250,7 @@ class AppState:
     def __init__(self) -> None:
         self.store = ConceptStore()
         self.engine: MultiLingualIACTEngine | None = None
+        self.search_engine: CognitiveSearchEngine | None = None
         self.engine_error: str | None = None
 
 
@@ -243,13 +271,19 @@ async def lifespan(_: FastAPI):
     # dashboard endpoints keep working and /commands/ reports a clear 503.
     try:
         state.engine = build_engine()
-        logger.info("IACT semantic engine ready (%d intents)", len(state.engine.intents))
+        state.search_engine = CognitiveSearchEngine(state.engine)
+        logger.info(
+            "IACT semantic engine ready (%d intents) + cognitive search",
+            len(state.engine.intents),
+        )
     except Exception as exc:  # pragma: no cover - depends on environment
         state.engine = None
+        state.search_engine = None
         state.engine_error = str(exc)
         logger.warning("IACT semantic engine unavailable: %s", exc)
     yield
     state.engine = None
+    state.search_engine = None
 
 
 app = FastAPI(
@@ -279,7 +313,15 @@ def root() -> dict:
         "version": app.version,
         "model": MODEL_NAME,
         "threshold": state.engine.threshold if state.engine else None,
-        "endpoints": ["/health/", "/network/", "/concepts/", "/intents/", "/commands/"],
+        "endpoints": [
+            "/health/",
+            "/network/",
+            "/concepts/",
+            "/intents/",
+            "/commands/",
+            "/search/",
+            "/qa/",
+        ],
     }
 
 
@@ -295,6 +337,13 @@ def health() -> dict:
             "fallback": state.engine.using_fallback if state.engine else None,
             "threshold": state.engine.threshold if state.engine else None,
             "intents": state.engine.intents if state.engine else [],
+        },
+        "cognitive_search": {
+            "ready": state.search_engine is not None,
+            "documents": state.search_engine.document_count if state.search_engine else 0,
+            "indexed_version": state.search_engine.indexed_version if state.search_engine else None,
+            "search_min_score": state.search_engine.search_min_score if state.search_engine else None,
+            "qa_min_score": state.search_engine.qa_min_score if state.search_engine else None,
         },
     }
 
@@ -351,3 +400,56 @@ def process_command(payload: CommandIn) -> dict:
     action = ACTION_MAP.get(result["intent"]) if result["intent"] else None
     result["action"] = action or CLARIFY_ACTION
     return result
+
+
+@app.get("/concepts/{title}")
+def get_concept(title: str) -> dict:
+    concepts, _ = state.store.snapshot()
+    for concept in concepts:
+        if concept["concept"].lower() == title.lower():
+            return concept
+    raise HTTPException(status_code=404, detail=f"concept {title!r} not found")
+
+
+def _require_search() -> CognitiveSearchEngine:
+    if state.search_engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail=state.engine_error
+            or "cognitive search engine is not initialized; install backend requirements",
+        )
+    return state.search_engine
+
+
+@app.post("/search/")
+def semantic_search(payload: SearchIn) -> dict:
+    """Semantic search across concept nodes, links and context."""
+    search = _require_search()
+    concepts, version = state.store.snapshot()
+    try:
+        return search.search(
+            payload.query,
+            concepts,
+            version,
+            top_k=payload.top_k,
+            min_score=payload.min_score,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/qa/")
+def cognitive_qa(payload: QAIn) -> dict:
+    """Answer a natural-language question from the associative network."""
+    search = _require_search()
+    concepts, version = state.store.snapshot()
+    try:
+        return search.answer(
+            payload.question,
+            concepts,
+            version,
+            top_k=payload.top_k,
+            min_score=payload.min_score,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

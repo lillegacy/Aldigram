@@ -137,6 +137,19 @@ class MultiLingualIACTEngine:
             vectors = vectors.reshape(1, -1)
         return vectors
 
+    def encode_texts(self, texts: Sequence[str]) -> np.ndarray:
+        """Encode raw texts into the engine's shared vector space.
+
+        Text is normalized (Thaana transliterated, punctuation flattened) before
+        encoding so callers always share the same representation as the intent
+        matcher.  Returns an ``(n, dim)`` matrix.
+        """
+        return self._encode([normalize_text(text) for text in texts])
+
+    def encode_query(self, text: str) -> np.ndarray:
+        """Encode a single raw text into one vector."""
+        return self._encode([normalize_text(text)])[0]
+
     # -------------------------------------------------------------------- API
     def add_intent(self, intent_name: str, sample_phrases: Iterable[str]) -> int:
         """Register *intent_name* with multilingual *sample_phrases*.
