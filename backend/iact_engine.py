@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from collections import defaultdict
 from typing import Callable, Iterable, Sequence
 
@@ -34,6 +35,15 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _running_on_android() -> bool:
+    """Detect Android/Termux, where native PyTorch wheels are unavailable."""
+    return (
+        sys.platform == "android"
+        or "ANDROID_ROOT" in os.environ
+        or "com.termux" in os.environ.get("PREFIX", "")
+    )
 
 
 class HashingEncoder:
@@ -78,8 +88,12 @@ class MultiLingualIACTEngine:
 
         self.model_name = model_name
         self.threshold = float(threshold)
+        # Native Termux cannot install PyTorch, so fall back automatically on
+        # Android.  Every other platform keeps the strict default (off).
         self.allow_fallback = (
-            _env_flag("IACT_ALLOW_FALLBACK") if allow_fallback is None else allow_fallback
+            _env_flag("IACT_ALLOW_FALLBACK", default=_running_on_android())
+            if allow_fallback is None
+            else allow_fallback
         )
 
         self._custom_encoder = encoder

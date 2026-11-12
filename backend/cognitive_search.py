@@ -18,6 +18,7 @@ Two capabilities are provided:
 from __future__ import annotations
 
 import os
+from threading import Lock
 from typing import Sequence
 
 import numpy as np
@@ -73,6 +74,7 @@ class CognitiveSearchEngine:
         self._docs: list[dict] = []
         self._vectors: np.ndarray | None = None
         self._version: int | None = None
+        self._index_lock = Lock()
 
     # ------------------------------------------------------------- index state
     @property
@@ -105,21 +107,22 @@ class CognitiveSearchEngine:
 
     def ensure_index(self, concepts: Sequence[dict], version: int) -> None:
         """Rebuild the vector index when the concept store version changes."""
-        if version == self._version:
-            return
+        with self._index_lock:
+            if version == self._version:
+                return
 
-        docs = [dict(concept) for concept in concepts]
-        if docs:
-            texts = [self._document_text(doc) for doc in docs]
-            vectors = np.asarray(self.engine.encode_texts(texts), dtype=np.float32)
-            if vectors.ndim == 1:
-                vectors = vectors.reshape(1, -1)
-        else:
-            vectors = None
+            docs = [dict(concept) for concept in concepts]
+            if docs:
+                texts = [self._document_text(doc) for doc in docs]
+                vectors = np.asarray(self.engine.encode_texts(texts), dtype=np.float32)
+                if vectors.ndim == 1:
+                    vectors = vectors.reshape(1, -1)
+            else:
+                vectors = None
 
-        self._docs = docs
-        self._vectors = vectors
-        self._version = version
+            self._docs = docs
+            self._vectors = vectors
+            self._version = version
 
     # ---------------------------------------------------------------- retrieval
     def _rank(self, query_vector: np.ndarray, top_k: int) -> list[dict]:

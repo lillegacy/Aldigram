@@ -21,112 +21,17 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
-from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from .cognitive_search import CognitiveSearchEngine
-from .iact_engine import DEFAULT_THRESHOLD, MODEL_NAME, MultiLingualIACTEngine
+from .iact_engine import MODEL_NAME, MultiLingualIACTEngine
+from .intents import ACTION_MAP, CLARIFY_ACTION, build_engine
+from .knowledge_base import ConceptStore, parse_concept
 
 logger = logging.getLogger("iact.backend")
-
-# ---------------------------------------------------------------------------
-# Default intent knowledge base.  Each intent is registered with the same
-# command expressed in English, Dhivehi (Latin transliteration) and Dhivehi
-# (Thaana) so that all three script variants land close together in vector
-# space.
-# ---------------------------------------------------------------------------
-DEFAULT_INTENTS: dict[str, list[str]] = {
-    "add_concept": [
-        "add a new concept",
-        "create a concept and integrate it into the network",
-        "register a new idea in the knowledge base",
-        # Dhivehi, Latin transliteration
-        "au konsepteh ithuru kurey",
-        "nuvata konsepteh add kurey",
-        # Dhivehi, Thaana script
-        "އައު ކޮންސެޕްޓެއް އިތުރުކުރޭ",
-    ],
-    "show_network": [
-        "show the network",
-        "display the associative network map",
-        "view all concepts and their links",
-        "netvaak dhakkaa",
-        "network dhakkaa",
-        "ނެޓްވާކް ދައްކާ",
-    ],
-    "search_concept": [
-        "search for a concept",
-        "find a concept by keyword",
-        "look up an idea in the network",
-        "konsepteh hoadhaa",
-        "concept eh hoyaa",
-        "ކޮންސެޕްޓެއް ހޯދާ",
-    ],
-    "delete_concept": [
-        "delete a concept",
-        "remove a concept from the network",
-        "drop an idea from the knowledge base",
-        "konsepteh fuhelaa",
-        "concept eh remove kurey",
-        "ކޮންސެޕްޓެއް ފުހެލާ",
-    ],
-    "export_network": [
-        "export the network",
-        "download the network as json",
-        "save a copy of the knowledge base",
-        "netvaak ekspoat kurey",
-        "network export kurey",
-        "ނެޓްވާކް އެކްސްޕޯޓްކުރޭ",
-    ],
-    "help": [
-        "help me",
-        "what can you do",
-        "show available commands",
-        "eheetheri vedhey",
-        "ehee therei vedhey",
-        "އެހީތެރިވެދޭ",
-    ],
-}
-
-# Intent -> frontend workflow mapping.
-ACTION_MAP: dict[str, dict] = {
-    "add_concept": {
-        "action": "open_concept_form",
-        "description": "Focus the dashboard's concept form to add a new node.",
-    },
-    "show_network": {
-        "action": "refresh_network_view",
-        "description": "Refresh and display the associative network map.",
-    },
-    "search_concept": {
-        "action": "focus_concept_search",
-        "description": "Focus concept search; expect a query parameter.",
-        "requires": ["query"],
-    },
-    "delete_concept": {
-        "action": "request_concept_deletion",
-        "description": "Ask the user which concept to remove.",
-        "requires": ["concept"],
-    },
-    "export_network": {
-        "action": "export_network_json",
-        "description": "Download the current knowledge base as JSON.",
-    },
-    "help": {
-        "action": "show_help",
-        "description": "Show available commands and examples in all three scripts.",
-    },
-}
-
-CLARIFY_ACTION = {
-    "action": "clarify",
-    "description": "No intent matched confidently; ask the user to rephrase.",
-    "requires": ["rephrase"],
-}
-
 
 # ---------------------------------------------------------------------------
 # Concept network (dashboard data)
@@ -162,87 +67,6 @@ class QAIn(BaseModel):
     min_score: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
-class ConceptStore:
-    """Thread-safe in-memory concept knowledge base."""
-
-    def __init__(self) -> None:
-        self._concepts: dict[str, dict] = {}
-        self._order: list[str] = []
-        self._lock = Lock()
-        self._version = 0
-
-    @property
-    def version(self) -> int:
-        """Monotonic counter bumped on every mutation (used by search index)."""
-        with self._lock:
-            return self._version
-
-    def upsert(self, concept: ConceptIn) -> dict:
-        title = concept.title.strip()
-        if not title:
-            raise ValueError("title must not be empty")
-        record = {
-            "concept": title,
-            "category": concept.category.strip() or "General",
-            "keywords": list(dict.fromkeys(concept.keywords)),
-        }
-        with self._lock:
-            if title not in self._concepts:
-                self._order.append(title)
-            self._concepts[title] = record
-            self._version += 1
-        return record
-
-    def delete(self, title: str) -> bool:
-        with self._lock:
-            if title not in self._concepts:
-                return False
-            del self._concepts[title]
-            self._order.remove(title)
-            self._version += 1
-            return True
-
-    def search(self, query: str) -> list[dict]:
-        needle = query.strip().lower()
-        if not needle:
-            return []
-        with self._lock:
-            results = []
-            for record in self._concepts.values():
-                haystack = " ".join([record["concept"], record["category"], *record["keywords"]]).lower()
-                if needle in haystack:
-                    results.append(dict(record))
-            return results
-
-    def snapshot(self) -> tuple[list[dict], int]:
-        """Return the linked network plus the store version, atomically."""
-        with self._lock:
-            records = [dict(record) for record in self._concepts.values()]
-            version = self._version
-        keyword_sets = {
-            record["concept"]: {keyword.lower() for keyword in record["keywords"]}
-            for record in records
-        }
-        network = []
-        for record in records:
-            title = record["concept"]
-            links = [
-                other["concept"]
-                for other in records
-                if other["concept"] != title
-                and keyword_sets[title] & keyword_sets[other["concept"]]
-            ]
-            network.append({**record, "links": links})
-        return network, version
-
-    def with_links(self) -> list[dict]:
-        return self.snapshot()[0]
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._concepts)
-
-
 # ---------------------------------------------------------------------------
 # Application state / startup
 # ---------------------------------------------------------------------------
@@ -255,14 +79,6 @@ class AppState:
 
 
 state = AppState()
-
-
-def build_engine() -> MultiLingualIACTEngine:
-    threshold = float(os.environ.get("IACT_MATCH_THRESHOLD", DEFAULT_THRESHOLD))
-    engine = MultiLingualIACTEngine(threshold=threshold)
-    for intent_name, sample_phrases in DEFAULT_INTENTS.items():
-        engine.add_intent(intent_name, sample_phrases)
-    return engine
 
 
 @asynccontextmanager
@@ -356,7 +172,7 @@ def get_network() -> dict:
 @app.post("/concepts/", status_code=201)
 def create_concept(concept: ConceptIn) -> dict:
     try:
-        return state.store.upsert(concept)
+        return state.store.upsert(parse_concept(concept.model_dump()))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

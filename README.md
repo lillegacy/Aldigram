@@ -22,13 +22,17 @@ triggers its workflow.
 ```
 IACTDashboard.jsx        React dashboard component
 backend/
-  main.py                FastAPI app, concept network, command/search/QA endpoints
+  main.py                FastAPI app (primary deployment)
+  termux_server.py       Native Termux server (stdlib + numpy, same API)
   iact_engine.py         MultiLingualIACTEngine + fallback encoder
   cognitive_search.py    CognitiveSearchEngine (semantic search + QA)
+  intents.py             Default intents + action mapping
+  knowledge_base.py      Concept store + validation
   multilingual.py        Thaana transliteration & text normalization
   requirements.txt
   tests/test_engine.py
   tests/test_cognitive_search.py
+  tests/test_termux_server.py
 ```
 
 ## Run the backend
@@ -46,16 +50,33 @@ Open http://127.0.0.1:8000/docs for the interactive API docs.
 
 > **Termux note:** PyTorch has no native Android wheels, so
 > `sentence-transformers` normally needs a Linux environment (e.g. a Debian
-> proot container or a PC/server). On plain Termux you can still run the API
-> with the lightweight fallback encoder:
->
-> ```bash
-> export IACT_ALLOW_FALLBACK=1
-> uvicorn backend.main:app --port 8000
-> ```
->
-> The fallback keeps the endpoints and intent resolution functional but is
-> **not** the multilingual transformer — use the real model for production.
+> proot container or a PC/server). Plain Termux can still run the **native
+> Termux server** below, which uses only the standard library and numpy and
+> automatically enables the lightweight fallback encoder on Android.
+
+### Native Termux
+
+FastAPI needs `pydantic-core` (Rust) and the transformer needs PyTorch; neither
+has native Termux wheels. `backend.termux_server` exposes the same JSON API
+without those dependencies:
+
+```bash
+pkg install python-numpy
+cd Aldigram
+python -m backend.termux_server --port 8000
+# LAN access from another device:
+# python -m backend.termux_server --host 0.0.0.0 --port 8000
+```
+
+- Same routes and response shapes as the FastAPI backend
+- On Android the fallback encoder turns on automatically; no env var needed
+- Set `IACT_ALLOW_FALLBACK=0` to force strict transformer loading
+- The FastAPI app remains the primary backend for servers, PCs and proot;
+  this server is purely additive for environments where FastAPI cannot install
+- Swagger `/docs` is only available from the FastAPI server
+
+The fallback keeps search, QA and intent resolution functional but is **not**
+the multilingual transformer — use the real model for production quality.
 
 ### Configuration
 
@@ -64,7 +85,7 @@ Open http://127.0.0.1:8000/docs for the interactive API docs.
 | `IACT_MATCH_THRESHOLD` | `0.45` | Minimum cosine similarity to resolve a command intent |
 | `IACT_SEARCH_MIN_SCORE` | `0.20` | Minimum similarity for semantic search to count as resolved |
 | `IACT_QA_MIN_SCORE` | `0.25` | Minimum similarity for a confident QA answer |
-| `IACT_ALLOW_FALLBACK` | `0` | Use char-n-gram encoder if the model can't load |
+| `IACT_ALLOW_FALLBACK` | `0` (`1` on Android) | Use char-n-gram encoder if the model can't load |
 | `IACT_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 
 ## API
@@ -224,6 +245,5 @@ python -m pytest backend/tests -q
 
 The tests use deterministic stub encoders and do not download the transformer
 model. They cover multilingual normalization, intent resolution, semantic
-search ranking, QA answer synthesis, subgraph context and index invalidation.
-
-The tests use a stub encoder and do not download the transformer model.
+search ranking, QA answer synthesis, subgraph context, index invalidation, and
+HTTP-level parity between the FastAPI routes and the native Termux server.
