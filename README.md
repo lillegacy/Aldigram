@@ -237,6 +237,29 @@ npm run dev
 Open http://localhost:5173. The dashboard expects the API at
 `http://127.0.0.1:8000`.
 
+## Deploy to a Hugging Face Space
+
+The repo includes a Docker Space setup (full app: FastAPI serves the built
+React dashboard on port 7860) and a deployment script:
+
+```bash
+pip install -U huggingface_hub
+hf auth login
+scripts/deploy_hf_space.sh <hf-user>/<space-name> --private
+```
+
+The script creates the Space if needed, stages `backend/`, `frontend/`,
+`Dockerfile` and the Space README, and uploads everything. The Space builds a
+CPU-only PyTorch image with the multilingual model baked in.
+
+Notes:
+
+- The app runs at `https://<hf-user>-<space-name>.hf.space`
+- Private Spaces require a Hugging Face login to open
+- A Hugging Face account needs available Space quota (`cpu-basic`); if the
+  runtime shows `Quota exceeded`, verify the account / check billing settings
+- Building the image takes several minutes on first deploy
+
 ## Tests
 
 ```bash

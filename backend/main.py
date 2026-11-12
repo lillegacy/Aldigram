@@ -21,9 +21,12 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from .cognitive_search import CognitiveSearchEngine
@@ -32,6 +35,9 @@ from .intents import ACTION_MAP, CLARIFY_ACTION, build_engine
 from .knowledge_base import ConceptStore, parse_concept
 
 logger = logging.getLogger("iact.backend")
+
+# Built dashboard (created by `npm run build` / the Docker build).
+FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
 # ---------------------------------------------------------------------------
 # Concept network (dashboard data)
@@ -122,8 +128,12 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-@app.get("/")
-def root() -> dict:
+@app.get("/", response_model=None)
+def root():
+    index = FRONTEND_DIST / "index.html"
+    if index.is_file():
+        # Serve the built dashboard when it is available (Docker/Space deploy).
+        return FileResponse(index)
     return {
         "name": "IACT Cognitive Backend",
         "version": app.version,
@@ -269,3 +279,9 @@ def cognitive_qa(payload: QAIn) -> dict:
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+# Serve the built dashboard (if present) from the same origin as the API.
+# Registered last so every API route and /docs takes precedence.
+if (FRONTEND_DIST / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")

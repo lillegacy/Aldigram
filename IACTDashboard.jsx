@@ -9,7 +9,13 @@ export default function IACTDashboard() {
     const [loading, setLoading] = useState(false);
     const [network, setNetwork] = useState([]);
 
-    const API_URL = "http://127.0.0.1:8000"; // FastAPI Backend URL
+    // Backend URL. On standalone local dev this defaults to the FastAPI port;
+    // when the dashboard is served by the backend itself (e.g. Hugging Face
+    // Space) main.jsx sets window.IACT_API_URL to "" for same-origin requests.
+    const API_URL =
+        typeof window !== "undefined" && window.IACT_API_URL !== undefined
+            ? window.IACT_API_URL
+            : "http://127.0.0.1:8000";
 
     // Fetch existing network on load
     useEffect(() => {

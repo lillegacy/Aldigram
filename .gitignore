@@ -5,3 +5,5 @@ venv/
 .env
 .pytest_cache/
 backend/data/
+frontend/dist/
+frontend/node_modules/
