@@ -66,19 +66,30 @@ class ApiError(Exception):
 class Service:
     """Application state shared by all request threads."""
 
-    def __init__(self) -> None:
-        self.store = ConceptStore()
+    def __init__(self, store: ConceptStore | None = None) -> None:
+        self.store = store if store is not None else ConceptStore()
         self.engine: MultiLingualIACTEngine | None = None
         self.search: CognitiveSearchEngine | None = None
         self.error: str | None = None
+        self.load_error: str | None = None
 
     def start(
         self,
         engine: MultiLingualIACTEngine | None = None,
         search: CognitiveSearchEngine | None = None,
     ) -> "Service":
+        # Restore persisted concepts first (vector indexes rebuild lazily).
+        try:
+            loaded = self.store.load_data()
+            if loaded:
+                logger.info("loaded %d concepts from %s", loaded, self.store.data_file)
+        except Exception as exc:  # pragma: no cover - depends on file contents
+            self.load_error = str(exc)
+            logger.warning("could not load %s: %s", self.store.data_file, exc)
+
         try:
             self.engine = engine if engine is not None else build_engine()
+            self.engine.concept_provider = self.store.snapshot
             self.search = (
                 search if search is not None else CognitiveSearchEngine(self.engine)
             )
@@ -94,6 +105,8 @@ class Service:
         return {
             "status": "ok",
             "concepts": len(self.store),
+            "data_file": self.store.data_file,
+            "load_error": self.load_error,
             "engine": {
                 "ready": self.engine is not None,
                 "error": self.error,
@@ -262,6 +275,7 @@ class IACTRequestHandler(BaseHTTPRequestHandler):
                     "/intents/",
                     "/commands/",
                     "/search/",
+                    "/api/search/",
                     "/qa/",
                 ],
             }
@@ -322,6 +336,15 @@ class IACTRequestHandler(BaseHTTPRequestHandler):
             action = ACTION_MAP.get(result["intent"]) if result["intent"] else None
             result["action"] = action or CLARIFY_ACTION
             return 200, result
+
+        if method == "POST" and path == "/api/search":
+            engine = _require_engine(service)
+            payload = self._read_json()
+            query = _string_field(payload, "query", max_length=500)
+            try:
+                return 200, engine.cognitive_search(query)
+            except ValueError as exc:
+                raise ApiError(422, str(exc)) from exc
 
         if method == "POST" and path == "/search":
             search = _require_search(service)
@@ -389,7 +412,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    server = create_server(args.host, args.port)
+    service = Service(
+        ConceptStore(data_file=os.environ.get("IACT_DATA_FILE", "iact_data.json"))
+    ).start()
+    server = create_server(args.host, args.port, service)
     if server.service.error:
         logger.warning(
             "engine unavailable (%s); concept endpoints still work",

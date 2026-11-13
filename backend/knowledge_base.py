@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from threading import Lock
+from typing import Union
 
 MAX_TITLE_LENGTH = 120
 MAX_CATEGORY_LENGTH = 60
@@ -44,9 +48,15 @@ def parse_concept(payload: dict) -> dict:
 
 
 class ConceptStore:
-    """Thread-safe in-memory concept knowledge base."""
+    """Thread-safe concept knowledge base with optional JSON persistence.
 
-    def __init__(self) -> None:
+    When ``data_file`` is set, every mutation is saved to disk (concept data
+    only - vectors are rebuilt in memory by the search engines, which keeps the
+    JSON lightweight) and :meth:`load_data` restores the store on startup.
+    """
+
+    def __init__(self, data_file: Union[str, os.PathLike, None] = None) -> None:
+        self.data_file = str(data_file) if data_file else None
         self._concepts: dict[str, dict] = {}
         self._order: list[str] = []
         self._lock = Lock()
@@ -57,6 +67,79 @@ class ConceptStore:
         """Monotonic counter bumped on every mutation (used by search index)."""
         with self._lock:
             return self._version
+
+    # ------------------------------------------------------------ persistence
+    def save_data(self) -> int:
+        """Write the knowledge base to :attr:`data_file` without vector data.
+
+        Returns the number of saved concepts (0 when persistence is disabled).
+        """
+        if not self.data_file:
+            return 0
+        with self._lock:
+            records = [
+                {
+                    "concept": record["concept"],
+                    "category": record["category"],
+                    "keywords": list(record["keywords"]),
+                }
+                for record in self._concepts.values()
+            ]
+
+        path = Path(self.data_file)
+        if path.parent != Path("."):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(path.name + ".tmp")
+        tmp_path.write_text(
+            json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp_path, path)
+        return len(records)
+
+    def load_data(self) -> int:
+        """Load concepts from :attr:`data_file` (replacing current contents).
+
+        Vectors are deliberately not persisted; they are re-encoded in memory
+        by the search engines the next time an index is built.  Returns the
+        number of loaded concepts (0 when the file or persistence is missing).
+        """
+        if not self.data_file:
+            return 0
+        path = Path(self.data_file)
+        if not path.is_file():
+            return 0
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise ValueError(f"{self.data_file} must contain a JSON list of concepts")
+
+        concepts: dict[str, dict] = {}
+        order: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            record = parse_concept(
+                {
+                    "title": entry.get("concept") or entry.get("title"),
+                    "category": entry.get("category"),
+                    "keywords": entry.get("keywords"),
+                }
+            )
+            concepts.setdefault(record["concept"], record)
+            order.append(record["concept"])
+
+        with self._lock:
+            self._concepts = concepts
+            self._order = [title for title in order if title in concepts]
+            self._version += 1
+        return len(concepts)
+
+    def _autosave(self) -> None:
+        if self.data_file:
+            try:
+                self.save_data()
+            except OSError:  # pragma: no cover - disk errors are non-fatal
+                pass
 
     def upsert(self, record: dict) -> dict:
         title = str(record.get("concept") or "").strip()
@@ -72,6 +155,7 @@ class ConceptStore:
                 self._order.append(title)
             self._concepts[title] = stored
             self._version += 1
+        self._autosave()
         return stored
 
     def delete(self, title: str) -> bool:
@@ -81,7 +165,8 @@ class ConceptStore:
             del self._concepts[title]
             self._order.remove(title)
             self._version += 1
-            return True
+        self._autosave()
+        return True
 
     def search(self, query: str) -> list[dict]:
         needle = query.strip().lower()

@@ -85,6 +85,7 @@ the multilingual transformer — use the real model for production quality.
 | `IACT_MATCH_THRESHOLD` | `0.45` | Minimum cosine similarity to resolve a command intent |
 | `IACT_SEARCH_MIN_SCORE` | `0.20` | Minimum similarity for semantic search to count as resolved |
 | `IACT_QA_MIN_SCORE` | `0.25` | Minimum similarity for a confident QA answer |
+| `IACT_DATA_FILE` | `iact_data.json` | Concept persistence file (no vectors; rebuilt on load) |
 | `IACT_ALLOW_FALLBACK` | `0` (`1` on Android) | Use char-n-gram encoder if the model can't load |
 | `IACT_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 
@@ -100,6 +101,7 @@ the multilingual transformer — use the real model for production quality.
 | `GET` | `/concepts/search/?q=...` | Substring search over concepts |
 | `GET` | `/intents/` | Registered intents and sample counts |
 | `POST` | `/commands/` | Resolve a natural-language command |
+| `POST` | `/api/search/` | Cognitive search over the knowledge base (spec endpoint) |
 | `POST` | `/search/` | Semantic search over concepts, links and context |
 | `POST` | `/qa/` | Answer a question from the associative network |
 
@@ -127,6 +129,30 @@ curl -s http://127.0.0.1:8000/commands/ \
 
 Unresolved commands return `"intent": null`, `"resolved": false` and an
 `action` of `clarify`.
+
+### Example — cognitive search (`/api/search/`)
+
+```bash
+curl -s http://127.0.0.1:8000/api/search/ \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "what is artificial intelligence"}'
+```
+
+```json
+{
+  "status": "success",
+  "answer": "Artificial Intelligence is a Technology concept in the IACT knowledge base. Key associations: ai, neural, cognition. Directly linked concepts: Neural Networks, Cognitive Science.",
+  "concept_name": "Artificial Intelligence",
+  "confidence": 0.67
+}
+```
+
+Below the 0.4 threshold the response is
+`{"status": "not_found", "message": "...", "confidence": ...}`; an empty
+knowledge base returns `{"status": "error", "message": "..."}`.
+
+Concept data is persisted to `iact_data.json` (vectors excluded) on every
+change and reloaded on startup; the search indexes re-encode automatically.
 
 ### Example — semantic search
 
@@ -268,5 +294,7 @@ python -m pytest backend/tests -q
 
 The tests use deterministic stub encoders and do not download the transformer
 model. They cover multilingual normalization, intent resolution, semantic
-search ranking, QA answer synthesis, subgraph context, index invalidation, and
-HTTP-level parity between the FastAPI routes and the native Termux server.
+search ranking, QA answer synthesis, subgraph context, index invalidation,
+JSON persistence round-trips, the spec-compatible `cognitive_search` contract
+(`/api/search/`), and HTTP-level parity between the FastAPI routes and the
+native Termux server.

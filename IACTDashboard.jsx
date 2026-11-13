@@ -8,6 +8,9 @@ export default function IACTDashboard() {
     const [keywords, setKeywords] = useState('');
     const [loading, setLoading] = useState(false);
     const [network, setNetwork] = useState([]);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResult, setSearchResult] = useState(null);
+    const [searching, setSearching] = useState(false);
 
     // Backend URL. On standalone local dev this defaults to the FastAPI port;
     // when the dashboard is served by the backend itself (e.g. Hugging Face
@@ -63,6 +66,47 @@ export default function IACTDashboard() {
         }
     };
 
+    // Cognitive search: asks the backend to resolve the query against the
+    // associative network and returns {status, answer, concept_name,
+    // confidence} (or a not_found / error status).
+    const handleSearch = async (e) => {
+        e.preventDefault();
+        const query = searchQuery.trim();
+        if (!query) return;
+
+        setSearching(true);
+        try {
+            const response = await fetch(`${API_URL}/api/search/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query })
+            });
+
+            const data = await response.json();
+            if (data.status === 'success') {
+                setSearchResult({
+                    status: 'success',
+                    answer: data.answer,
+                    concept: data.concept_name,
+                    confidence: data.confidence
+                });
+            } else {
+                setSearchResult({
+                    status: data.status === 'error' ? 'error' : 'not_found',
+                    message: data.message || 'No matching concept was found.'
+                });
+            }
+        } catch (error) {
+            console.error("Cognitive search failed:", error);
+            setSearchResult({
+                status: 'error',
+                message: 'Could not reach the cognitive search service.'
+            });
+        } finally {
+            setSearching(false);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-slate-50 p-6 font-sans text-slate-900" dir="ltr">
             <div className="max-w-5xl mx-auto">
@@ -74,7 +118,48 @@ export default function IACTDashboard() {
                 </header>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    
+
+                    {/* Cognitive Search Section */}
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 md:col-span-3">
+                        <h2 className="text-lg font-semibold mb-4 text-slate-800">Cognitive Search</h2>
+                        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3">
+                            <input
+                                type="text"
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                placeholder="Ask about a concept, e.g. what is artificial intelligence?"
+                                className="flex-1 px-3 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none text-sm"
+                            />
+                            <button
+                                type="submit"
+                                disabled={searching}
+                                className="bg-slate-900 text-white px-5 py-2 rounded-xl font-medium hover:bg-slate-700 transition shadow-sm text-sm disabled:opacity-60"
+                            >
+                                {searching ? 'Searching…' : 'Search'}
+                            </button>
+                        </form>
+
+                        {searchResult && (
+                            <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                                {searchResult.status === 'success' ? (
+                                    <>
+                                        <div className="flex items-center justify-between">
+                                            <span className="font-bold text-indigo-700 text-sm">{searchResult.concept}</span>
+                                            <span className="text-xs bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-full font-medium">
+                                                {Math.round((searchResult.confidence ?? 0) * 100)}% match
+                                            </span>
+                                        </div>
+                                        <p className="text-sm text-slate-700 mt-2">{searchResult.answer}</p>
+                                    </>
+                                ) : (
+                                    <p className="text-sm text-slate-500 italic">
+                                        {searchResult.message || 'No matching concept was found.'}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
                     {/* Form Section */}
                     <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 md:col-span-1 h-fit">
                         <h2 className="text-lg font-semibold mb-4 text-slate-800">Add New Concept</h2>

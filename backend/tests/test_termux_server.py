@@ -170,6 +170,21 @@ def test_command_via_http(api):
     assert body["action"]["action"] == "refresh_network_view"
 
 
+def test_api_search_spec_route(api):
+    seed_concepts(api)
+    status, body, _ = request(
+        api, "POST", "/api/search/", {"query": "what is artificial intelligence"}
+    )
+    assert status == 200
+    assert body["status"] == "success"
+    assert body["concept_name"] == "Artificial Intelligence"
+    assert 0.0 <= body["confidence"] <= 1.0
+
+    status, body, _ = request(api, "POST", "/api/search/", {"query": "banana smoothie"})
+    assert status == 200
+    assert body["status"] == "not_found"
+
+
 def test_validation_and_errors(api):
     status, body, _ = request(api, "POST", "/concepts/", {})
     assert status == 422

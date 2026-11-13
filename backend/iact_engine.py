@@ -14,6 +14,7 @@ import hashlib
 import os
 import sys
 from collections import defaultdict
+from threading import Lock
 from typing import Callable, Iterable, Sequence
 
 import numpy as np
@@ -104,6 +105,15 @@ class MultiLingualIACTEngine:
         self._phrases: list[str] = []
         self._seen: set[tuple[str, str]] = set()
         self._vectors: np.ndarray | None = None
+
+        # Concept knowledge base access for cognitive_search().  The provider
+        # returns (linked concept records, store version); wire it from the
+        # ConceptStore so the engine never duplicates concept state.
+        self.concept_provider: Callable[[], tuple[Sequence[dict], int]] | None = None
+        self._concept_docs: list[dict] = []
+        self._concept_vectors: np.ndarray | None = None
+        self._concept_version: int | None = None
+        self._concept_lock = Lock()
 
     # ------------------------------------------------------------------ setup
     def _get_encoder(self) -> Encoder:
@@ -258,6 +268,113 @@ class MultiLingualIACTEngine:
         )
         return base
 
+    # ------------------------------------------------------- cognitive search
+    def _ensure_concept_index(self, concepts: Sequence[dict], version: int) -> None:
+        """(Re)build the concept vector cache when the store version changes."""
+        with self._concept_lock:
+            if version == self._concept_version:
+                return
+            try:  # Lazy import avoids a module-level circular import.
+                from .cognitive_search import concept_document_text
+            except ImportError:  # pragma: no cover - flat imports
+                from cognitive_search import concept_document_text  # type: ignore
+
+            docs = [dict(concept) for concept in concepts]
+            vectors = None
+            if docs:
+                vectors = np.asarray(
+                    self.encode_texts([concept_document_text(doc) for doc in docs]),
+                    dtype=np.float32,
+                )
+                if vectors.ndim == 1:
+                    vectors = vectors.reshape(1, -1)
+            self._concept_docs = docs
+            self._concept_vectors = vectors
+            self._concept_version = version
+
+    @staticmethod
+    def _concept_answer(concept: dict) -> str:
+        """Extractive answer for a matched concept (description if present)."""
+        description = str(concept.get("description") or "").strip()
+        if description:
+            return description
+
+        parts = [
+            f"{concept.get('concept', '')} is a "
+            f"{concept.get('category', 'General')} concept in the IACT knowledge base."
+        ]
+        keywords = [str(keyword) for keyword in concept.get("keywords") or []]
+        if keywords:
+            parts.append("Key associations: " + ", ".join(keywords) + ".")
+        links = [str(link) for link in concept.get("links") or []]
+        if links:
+            parts.append("Directly linked concepts: " + ", ".join(links) + ".")
+        return " ".join(parts)
+
+    def cognitive_search(self, query: str, threshold: float = 0.4) -> dict:
+        """Search the concept knowledge base and answer *query*.
+
+        Spec-compatible response shape:
+
+        - ``{"status": "success", "answer", "concept_name", "confidence"}``
+          when the best match scores at or above ``threshold`` (default 0.4);
+        - ``{"status": "not_found", "message", "confidence"}`` otherwise;
+        - ``{"status": "error", "message"}`` when the knowledge base or query
+          cannot be searched.
+        """
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be between 0.0 and 1.0")
+
+        command = (query or "").strip()
+        if not command:
+            return {"status": "error", "message": "query must not be empty"}
+
+        if self.concept_provider is None:
+            return {
+                "status": "error",
+                "message": "no concept provider is configured",
+            }
+
+        concepts, version = self.concept_provider()
+        if not concepts:
+            return {"status": "error", "message": "the knowledge base is empty"}
+
+        normalized = normalize_text(command)
+        if not normalized:
+            return {
+                "status": "error",
+                "message": "query contains no searchable text",
+            }
+
+        self._ensure_concept_index(concepts, version)
+        if self._concept_vectors is None or not self._concept_docs:
+            return {"status": "error", "message": "the knowledge base is empty"}
+
+        query_vector = self.encode_query(command)
+        best_index = -1
+        best_score = -1.0
+        for index, vector in enumerate(self._concept_vectors):
+            score = self.cosine_similarity(query_vector, vector)
+            if score > best_score:
+                best_score = score
+                best_index = index
+
+        confidence = round(max(best_score, 0.0), 2)
+        if best_index < 0 or best_score < threshold:
+            return {
+                "status": "not_found",
+                "message": "No concept in the cognitive network matches this query.",
+                "confidence": confidence,
+            }
+
+        concept = self._concept_docs[best_index]
+        return {
+            "status": "success",
+            "answer": self._concept_answer(concept),
+            "concept_name": concept.get("concept", ""),
+            "confidence": confidence,
+        }
+
     @staticmethod
     def cosine_similarity(v1, v2) -> float:
         """Cosine similarity between two vectors, safe for zero vectors."""
@@ -269,6 +386,9 @@ class MultiLingualIACTEngine:
         if denominator == 0.0:
             return 0.0
         return float(np.dot(a, b) / denominator)
+
+    # Compatibility alias matching earlier spec examples.
+    _cosine_similarity = cosine_similarity
 
     # ----------------------------------------------------------- introspection
     @property

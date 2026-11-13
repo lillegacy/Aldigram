@@ -7,3 +7,5 @@ venv/
 backend/data/
 frontend/dist/
 frontend/node_modules/
+iact_data.json
+

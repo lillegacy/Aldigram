@@ -67,6 +67,12 @@ class SearchIn(BaseModel):
     min_score: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class SearchQuery(BaseModel):
+    """Spec-compatible cognitive search request body."""
+
+    query: str = Field(min_length=1, max_length=500)
+
+
 class QAIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     top_k: int = Field(default=3, ge=1, le=10)
@@ -78,10 +84,13 @@ class QAIn(BaseModel):
 # ---------------------------------------------------------------------------
 class AppState:
     def __init__(self) -> None:
-        self.store = ConceptStore()
+        self.store = ConceptStore(
+            data_file=os.environ.get("IACT_DATA_FILE", "iact_data.json")
+        )
         self.engine: MultiLingualIACTEngine | None = None
         self.search_engine: CognitiveSearchEngine | None = None
         self.engine_error: str | None = None
+        self.load_error: str | None = None
 
 
 state = AppState()
@@ -89,10 +98,20 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Restore persisted concepts first (vector indexes rebuild lazily).
+    try:
+        loaded = state.store.load_data()
+        if loaded:
+            logger.info("Loaded %d concepts from %s", loaded, state.store.data_file)
+    except Exception as exc:  # pragma: no cover - depends on file contents
+        state.load_error = str(exc)
+        logger.warning("Could not load %s: %s", state.store.data_file, exc)
+
     # Load the embedding model once at startup.  Failure is not fatal: the
     # dashboard endpoints keep working and /commands/ reports a clear 503.
     try:
         state.engine = build_engine()
+        state.engine.concept_provider = state.store.snapshot
         state.search_engine = CognitiveSearchEngine(state.engine)
         logger.info(
             "IACT semantic engine ready (%d intents) + cognitive search",
@@ -146,6 +165,7 @@ def root():
             "/intents/",
             "/commands/",
             "/search/",
+            "/api/search/",
             "/qa/",
         ],
     }
@@ -156,6 +176,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "concepts": len(state.store),
+        "data_file": state.store.data_file,
+        "load_error": state.load_error,
         "engine": {
             "ready": state.engine is not None,
             "error": state.engine_error,
@@ -245,6 +267,20 @@ def _require_search() -> CognitiveSearchEngine:
             or "cognitive search engine is not initialized; install backend requirements",
         )
     return state.search_engine
+
+
+@app.post("/api/search/")
+def cognitive_search(request: SearchQuery) -> dict:
+    """Spec-compatible cognitive search over the concept knowledge base."""
+    if state.engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail=state.engine_error or "semantic engine is not initialized",
+        )
+    try:
+        return state.engine.cognitive_search(request.query)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/search/")

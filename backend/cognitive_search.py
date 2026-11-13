@@ -44,6 +44,27 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def concept_document_text(concept: dict) -> str:
+    """Flatten a concept node into indexable text.
+
+    The title is included twice to weight it above keywords and neighbour names
+    when ranking, which keeps title matches ahead of incidental keyword
+    overlap.  Shared by :class:`CognitiveSearchEngine` and
+    ``MultiLingualIACTEngine.cognitive_search``.
+    """
+    title = str(concept.get("concept", ""))
+    parts = [
+        title,
+        title,
+        str(concept.get("category", "")),
+        " ".join(str(keyword) for keyword in concept.get("keywords") or []),
+    ]
+    links = [str(link) for link in concept.get("links") or []]
+    if links:
+        parts.append("connected to " + " ".join(links))
+    return ". ".join(part for part in parts if part.strip())
+
+
 class CognitiveSearchEngine:
     """Semantic search + QA over the associative network.
 
@@ -85,25 +106,7 @@ class CognitiveSearchEngine:
     def indexed_version(self) -> int | None:
         return self._version
 
-    @staticmethod
-    def _document_text(concept: dict) -> str:
-        """Flatten a concept node into indexable text.
-
-        The title is included twice to weight it above keywords and neighbour
-        names when ranking, which keeps title matches ahead of incidental
-        keyword overlap.
-        """
-        title = str(concept.get("concept", ""))
-        parts = [
-            title,
-            title,
-            str(concept.get("category", "")),
-            " ".join(str(keyword) for keyword in concept.get("keywords") or []),
-        ]
-        links = [str(link) for link in concept.get("links") or []]
-        if links:
-            parts.append("connected to " + " ".join(links))
-        return ". ".join(part for part in parts if part.strip())
+    _document_text = staticmethod(concept_document_text)
 
     def ensure_index(self, concepts: Sequence[dict], version: int) -> None:
         """Rebuild the vector index when the concept store version changes."""
