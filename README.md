@@ -2,7 +2,9 @@
 
 Integrative Associative Cognition (IACT) dashboard: a React frontend plus a
 FastAPI backend with a **multi-lingual cognitive command engine**, **semantic
-search** and **question answering** over the associative network.
+search**, **question answering** over the associative network, and the
+**CECANP-0.54 / IACT-5SCP** energy-optimisation and sensory-anchoring
+protocols.
 
 Commands can be written in:
 
@@ -26,13 +28,16 @@ backend/
   termux_server.py       Native Termux server (stdlib + numpy, same API)
   iact_engine.py         MultiLingualIACTEngine + fallback encoder
   cognitive_search.py    CognitiveSearchEngine (semantic search + QA)
+  cognitive_optimizer.py CECANP-0.54 optimiser + IACT-5SCP synthesis
   intents.py             Default intents + action mapping
   knowledge_base.py      Concept store + validation
   multilingual.py        Thaana transliteration & text normalization
   requirements.txt
   tests/test_engine.py
   tests/test_cognitive_search.py
+  tests/test_cognitive_optimizer.py
   tests/test_termux_server.py
+  tests/test_fastapi_parity.py
 ```
 
 ## Run the backend
@@ -86,6 +91,7 @@ the multilingual transformer — use the real model for production quality.
 | `IACT_SEARCH_MIN_SCORE` | `0.20` | Minimum similarity for semantic search to count as resolved |
 | `IACT_QA_MIN_SCORE` | `0.25` | Minimum similarity for a confident QA answer |
 | `IACT_DATA_FILE` | `iact_data.json` | Concept persistence file (no vectors; rebuilt on load) |
+| `IACT_REPETITION_THRESHOLD` | `3` | Runs before a route is cached (allowed range: 3–5) |
 | `IACT_ALLOW_FALLBACK` | `0` (`1` on Android) | Use char-n-gram encoder if the model can't load |
 | `IACT_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 
@@ -104,6 +110,8 @@ the multilingual transformer — use the real model for production quality.
 | `POST` | `/api/search/` | Cognitive search over the knowledge base (spec endpoint) |
 | `POST` | `/search/` | Semantic search over concepts, links and context |
 | `POST` | `/qa/` | Answer a question from the associative network |
+| `POST` | `/optimizer/run/` | Track a route through CECANP-0.54 (load/bandwidth/cache) |
+| `POST` | `/optimizer/sensory-pair/` | IACT-5SCP five-second sensory synthesis and anchoring |
 
 ### Example — command resolution
 
@@ -153,6 +161,73 @@ knowledge base returns `{"status": "error", "message": "..."}`.
 
 Concept data is persisted to `iact_data.json` (vectors excluded) on every
 change and reloaded on startup; the search indexes re-encode automatically.
+
+### CECANP-0.54 route optimisation
+
+Repeated routes move through three execution levels:
+
+| Runs | Execution | Compute load | Associative bandwidth |
+|---|---|---|---|
+| 1 | `learning` | `1.00` | `0.00` |
+| 2 … threshold−1 | `partial` | `0.65` | `0.35` |
+| ≥ threshold (3–5) | `cached` | `0.54` | `0.46` |
+
+`process_command` feeds every route through the optimiser, so `/commands/`
+responses include an `optimizer` block with the current mode. An anomaly
+signal (`anomaly`, `unexpected`, `contradiction`, `violation`, `alert`,
+`fault`) or a `decision_node` path step forces full recomputation and opens a
+**five-second override window** that bypasses the cache
+(`anomaly_override` / `decision_override`). After the window the route
+relearns from `1.00`.
+
+```bash
+curl -s http://127.0.0.1:8000/optimizer/run/ \
+  -H 'Content-Type: application/json' \
+  -d '{"intent": "show_network", "trigger_signal": "show the network", "path_steps": ["semantic_match"]}'
+```
+
+```json
+{
+  "status": "success",
+  "intent": "show_network",
+  "route_key": "show_network",
+  "compute_load": 0.54,
+  "associative_bandwidth": 0.46,
+  "execution_status": "cached",
+  "cache_progress": {"runs": 3, "threshold": 3, "remaining": 0, "cached": true},
+  "cached_routes": 1,
+  "anomaly": false,
+  "decision_node": false,
+  "override": {"active": false, "kind": null, "remaining_seconds": 0.0}
+}
+```
+
+`GET /health/` exposes the live `compute_load`, `associative_bandwidth` and
+`cached_routes` values (also nested under `optimizer`).
+
+### IACT-5SCP sensory anchoring
+
+Two sensory inputs captured within **5.0 seconds** are synthesised into an
+anchored concept and written directly into the shared `ConceptStore` — single
+source of truth, so the anchor is persisted to `iact_data.json` and is
+immediately searchable through `/search/`, `/qa/` and `/api/search/`. The
+volatile TTL lock only tracks the five-second synthesis window; the anchored
+concept itself remains durable. Pairs captured after 5.0 seconds are
+discarded and never touch the store.
+
+```bash
+curl -s http://127.0.0.1:8000/optimizer/sensory-pair/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "item_a": {"modality": "visual", "description": "red square", "focus_duration": 0.8},
+    "item_b": {"modality": "auditory", "description": "low tone", "focus_duration": 1.2},
+    "capture_delay_seconds": 4.5
+  }'
+```
+
+A successful synthesis returns `"status": "anchored"` with the persisted
+`concept` and its `anchored_concept` TTL metadata; a delay above the window
+returns `"status": "discarded"`.
 
 ### Example — semantic search
 
@@ -296,5 +371,7 @@ The tests use deterministic stub encoders and do not download the transformer
 model. They cover multilingual normalization, intent resolution, semantic
 search ranking, QA answer synthesis, subgraph context, index invalidation,
 JSON persistence round-trips, the spec-compatible `cognitive_search` contract
-(`/api/search/`), and HTTP-level parity between the FastAPI routes and the
-native Termux server.
+(`/api/search/`), CECANP-0.54 cache/anomaly/decision-node transitions,
+IACT-5SCP anchoring and TTL expiry, and HTTP-level parity between the FastAPI
+routes and the native Termux server. The FastAPI parity test starts uvicorn
+(and is skipped automatically on Termux, where uvicorn is unavailable).

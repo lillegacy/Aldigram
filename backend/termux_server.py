@@ -26,8 +26,11 @@ GET  /concepts/{title} single concept
 POST /concepts/        add/update a concept
 DELETE /concepts/{title}
 POST /commands/        multilingual command -> intent -> action
+POST /api/search/      cognitive search (spec response shape)
 POST /search/          semantic search
 POST /qa/              question answering
+POST /optimizer/run/   CECANP-0.54 route load tracking
+POST /optimizer/sensory-pair/  IACT-5SCP sensory synthesis + anchoring
 """
 
 from __future__ import annotations
@@ -40,11 +43,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 try:  # Package import (python -m backend.termux_server)
+    from .cognitive_optimizer import (
+        IntegratedIACTSystem,
+        SensoryInput,
+        repetition_threshold_from_env,
+    )
     from .cognitive_search import CognitiveSearchEngine
     from .iact_engine import MODEL_NAME, MultiLingualIACTEngine
     from .intents import ACTION_MAP, CLARIFY_ACTION, build_engine
     from .knowledge_base import ConceptStore, parse_concept
 except ImportError:  # pragma: no cover - direct script execution
+    from cognitive_optimizer import IntegratedIACTSystem  # type: ignore
+    from cognitive_optimizer import SensoryInput, repetition_threshold_from_env  # type: ignore
     from cognitive_search import CognitiveSearchEngine  # type: ignore
     from iact_engine import MODEL_NAME, MultiLingualIACTEngine  # type: ignore
     from intents import ACTION_MAP, CLARIFY_ACTION, build_engine  # type: ignore
@@ -68,6 +78,10 @@ class Service:
 
     def __init__(self, store: ConceptStore | None = None) -> None:
         self.store = store if store is not None else ConceptStore()
+        self.optimizer = IntegratedIACTSystem(
+            concept_writer=self.store.upsert,
+            repetition_threshold=repetition_threshold_from_env(),
+        )
         self.engine: MultiLingualIACTEngine | None = None
         self.search: CognitiveSearchEngine | None = None
         self.error: str | None = None
@@ -90,6 +104,7 @@ class Service:
         try:
             self.engine = engine if engine is not None else build_engine()
             self.engine.concept_provider = self.store.snapshot
+            self.engine.optimizer = self.optimizer
             self.search = (
                 search if search is not None else CognitiveSearchEngine(self.engine)
             )
@@ -102,11 +117,16 @@ class Service:
         return self
 
     def health(self) -> dict:
+        optimizer = self.optimizer.telemetry()
         return {
             "status": "ok",
             "concepts": len(self.store),
             "data_file": self.store.data_file,
             "load_error": self.load_error,
+            "compute_load": optimizer["compute_load"],
+            "associative_bandwidth": optimizer["associative_bandwidth"],
+            "cached_routes": optimizer["cached_routes"],
+            "optimizer": optimizer,
             "engine": {
                 "ready": self.engine is not None,
                 "error": self.error,
@@ -166,6 +186,36 @@ def _int_field(payload: dict, key: str, default: int, *, low: int, high: int) ->
     if isinstance(value, bool) or not low <= parsed <= high:
         raise ApiError(422, f"{key} must be between {low} and {high}")
     return parsed
+
+
+def _float_field(
+    payload: dict, key: str, *, low: float, high: float, default: float | None = None
+) -> float:
+    value = payload.get(key, default)
+    if value is None:
+        raise ApiError(422, f"{key} is required")
+    if isinstance(value, bool):
+        raise ApiError(422, f"{key} must be a number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(422, f"{key} must be a number") from exc
+    if not low <= parsed <= high:
+        raise ApiError(422, f"{key} must be between {low} and {high}")
+    return parsed
+
+
+def _sensory_item(payload: dict, key: str) -> SensoryInput:
+    item = payload.get(key)
+    if not isinstance(item, dict):
+        raise ApiError(422, f"{key} must be an object")
+    modality = _string_field(item, "modality", max_length=60)
+    description = _string_field(item, "description", max_length=500)
+    focus = _float_field(item, "focus_duration", low=0.0, high=3600.0, default=0.0)
+    try:
+        return SensoryInput(modality, description, focus)
+    except ValueError as exc:
+        raise ApiError(422, str(exc)) from exc
 
 
 def _score_field(payload: dict, key: str) -> float | None:
@@ -277,6 +327,8 @@ class IACTRequestHandler(BaseHTTPRequestHandler):
                     "/search/",
                     "/api/search/",
                     "/qa/",
+                    "/optimizer/run/",
+                    "/optimizer/sensory-pair/",
                 ],
             }
 
@@ -343,6 +395,40 @@ class IACTRequestHandler(BaseHTTPRequestHandler):
             query = _string_field(payload, "query", max_length=500)
             try:
                 return 200, engine.cognitive_search(query)
+            except ValueError as exc:
+                raise ApiError(422, str(exc)) from exc
+
+        if method == "POST" and path == "/optimizer/run":
+            payload = self._read_json()
+            intent = _string_field(payload, "intent", max_length=200)
+            trigger = _string_field(payload, "trigger_signal", max_length=500)
+            raw_steps = payload.get("path_steps") or []
+            if not isinstance(raw_steps, list):
+                raise ApiError(422, "path_steps must be a list of strings")
+            if len(raw_steps) > 50:
+                raise ApiError(422, "path_steps must contain at most 50 steps")
+            steps = []
+            for step in raw_steps:
+                if not isinstance(step, str):
+                    raise ApiError(422, "path_steps must contain strings")
+                if step.strip():
+                    steps.append(step.strip()[:200])
+            try:
+                return 200, service.optimizer.run_optimizer(intent, trigger, steps)
+            except ValueError as exc:
+                raise ApiError(422, str(exc)) from exc
+
+        if method == "POST" and path == "/optimizer/sensory-pair":
+            payload = self._read_json()
+            item_a = _sensory_item(payload, "item_a")
+            item_b = _sensory_item(payload, "item_b")
+            delay = _float_field(
+                payload, "capture_delay_seconds", low=0.0, high=3600.0
+            )
+            try:
+                return 200, service.optimizer.synthesize_sensory_pair(
+                    item_a, item_b, delay
+                )
             except ValueError as exc:
                 raise ApiError(422, str(exc)) from exc
 

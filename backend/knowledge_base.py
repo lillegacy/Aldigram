@@ -12,6 +12,7 @@ MAX_TITLE_LENGTH = 120
 MAX_CATEGORY_LENGTH = 60
 MAX_KEYWORDS = 50
 MAX_KEYWORD_LENGTH = 60
+MAX_DESCRIPTION_LENGTH = 2000
 
 
 def parse_concept(payload: dict) -> dict:
@@ -30,6 +31,12 @@ def parse_concept(payload: dict) -> dict:
     if len(category) > MAX_CATEGORY_LENGTH:
         raise ValueError(f"category must be at most {MAX_CATEGORY_LENGTH} characters")
 
+    description = str(payload.get("description") or "").strip()
+    if len(description) > MAX_DESCRIPTION_LENGTH:
+        raise ValueError(
+            f"description must be at most {MAX_DESCRIPTION_LENGTH} characters"
+        )
+
     raw_keywords = payload.get("keywords") or []
     if isinstance(raw_keywords, str):
         raw_keywords = raw_keywords.split(",")
@@ -40,11 +47,14 @@ def parse_concept(payload: dict) -> dict:
         if keyword:
             keywords.append(keyword[:MAX_KEYWORD_LENGTH])
 
-    return {
+    record = {
         "concept": title,
         "category": category,
         "keywords": list(dict.fromkeys(keywords))[:MAX_KEYWORDS],
     }
+    if description:
+        record["description"] = description
+    return record
 
 
 class ConceptStore:
@@ -77,14 +87,16 @@ class ConceptStore:
         if not self.data_file:
             return 0
         with self._lock:
-            records = [
-                {
+            records = []
+            for record in self._concepts.values():
+                entry = {
                     "concept": record["concept"],
                     "category": record["category"],
                     "keywords": list(record["keywords"]),
                 }
-                for record in self._concepts.values()
-            ]
+                if record.get("description"):
+                    entry["description"] = record["description"]
+                records.append(entry)
 
         path = Path(self.data_file)
         if path.parent != Path("."):
@@ -123,6 +135,7 @@ class ConceptStore:
                     "title": entry.get("concept") or entry.get("title"),
                     "category": entry.get("category"),
                     "keywords": entry.get("keywords"),
+                    "description": entry.get("description"),
                 }
             )
             concepts.setdefault(record["concept"], record)
@@ -145,11 +158,18 @@ class ConceptStore:
         title = str(record.get("concept") or "").strip()
         if not title:
             raise ValueError("concept title must not be empty")
+        description = str(record.get("description") or "").strip()
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            raise ValueError(
+                f"description must be at most {MAX_DESCRIPTION_LENGTH} characters"
+            )
         stored = {
             "concept": title,
             "category": str(record.get("category") or "General").strip() or "General",
             "keywords": list(dict.fromkeys(record.get("keywords") or [])),
         }
+        if description:
+            stored["description"] = description
         with self._lock:
             if title not in self._concepts:
                 self._order.append(title)
@@ -176,7 +196,12 @@ class ConceptStore:
             results = []
             for record in self._concepts.values():
                 haystack = " ".join(
-                    [record["concept"], record["category"], *record["keywords"]]
+                    [
+                        record["concept"],
+                        record["category"],
+                        record.get("description", ""),
+                        *record["keywords"],
+                    ]
                 ).lower()
                 if needle in haystack:
                     results.append(dict(record))

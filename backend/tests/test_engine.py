@@ -113,3 +113,20 @@ def test_hashing_fallback_encoder():
     assert vectors.shape == (3, 64)
     assert np.allclose(vectors[0], vectors[1])
     assert not np.allclose(vectors[0], vectors[2])
+
+
+def test_repeated_commands_transition_to_cached_load():
+    engine = make_engine()
+
+    first = engine.process_command("show the network")
+    second = engine.process_command("show the network")
+    third = engine.process_command("show the network")
+
+    assert first["optimizer"]["execution_status"] == "learning"
+    assert first["optimizer"]["compute_load"] == 1.0
+    assert second["optimizer"]["execution_status"] == "partial"
+    assert second["optimizer"]["compute_load"] == 0.65
+    assert third["optimizer"]["execution_status"] == "cached"
+    assert third["optimizer"]["compute_load"] == 0.54
+    assert third["optimizer"]["associative_bandwidth"] == 0.46
+    assert third["optimizer"]["cache_progress"]["cached"] is True

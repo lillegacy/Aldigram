@@ -70,3 +70,25 @@ def test_load_accepts_legacy_title_key(tmp_path):
     network, _ = store.snapshot()
     assert network[0]["concept"] == "Legacy Concept"
     assert network[0]["keywords"] == ["old", "data"]
+
+
+def test_description_roundtrip(tmp_path):
+    path = tmp_path / "iact_data.json"
+    store = ConceptStore(data_file=path)
+    store.upsert(
+        {
+            "concept": "Sensory Anchor",
+            "category": "Sensory Synthesis",
+            "keywords": ["cross-modal", "anchored"],
+            "description": "Cross-modal synthesis captured within 1.00s.",
+        }
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload[0]["description"] == "Cross-modal synthesis captured within 1.00s."
+
+    reloaded = ConceptStore(data_file=path)
+    assert reloaded.load_data() == 1
+    network, _ = reloaded.snapshot()
+    assert network[0]["description"] == payload[0]["description"]
+    assert reloaded.search("cross-modal")[0]["concept"] == "Sensory Anchor"

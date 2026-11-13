@@ -111,6 +111,123 @@ def test_health(api):
     assert body["status"] == "ok"
     assert body["engine"]["ready"] is True
     assert body["cognitive_search"]["ready"] is True
+    assert body["compute_load"] == 1.0
+    assert body["associative_bandwidth"] == 0.0
+    assert body["cached_routes"] == 0
+    assert body["optimizer"]["repetition_threshold"] == 3
+
+
+def test_optimizer_run_route(api):
+    payload = {
+        "intent": "show_network",
+        "trigger_signal": "show the network",
+        "path_steps": ["semantic_match", "action_dispatch"],
+    }
+    status, first, _ = request(api, "POST", "/optimizer/run/", payload)
+    assert status == 200
+    assert first["compute_load"] == 1.0
+    assert first["execution_status"] == "learning"
+
+    _, second, _ = request(api, "POST", "/optimizer/run/", payload)
+    assert second["compute_load"] == 0.65
+
+    _, third, _ = request(api, "POST", "/optimizer/run/", payload)
+    assert third["compute_load"] == 0.54
+    assert third["associative_bandwidth"] == 0.46
+    assert third["execution_status"] == "cached"
+    assert third["cached_routes"] == 1
+
+    _, body, _ = request(api, "GET", "/health/")
+    assert body["compute_load"] == 0.54
+    assert body["associative_bandwidth"] == 0.46
+    assert body["cached_routes"] == 1
+
+    status, anomaly, _ = request(
+        api,
+        "POST",
+        "/optimizer/run/",
+        {
+            "intent": "show_network",
+            "trigger_signal": "unexpected anomaly detected",
+            "path_steps": [],
+        },
+    )
+    assert status == 200
+    assert anomaly["execution_status"] == "anomaly_override"
+    assert anomaly["compute_load"] == 1.0
+
+
+def test_optimizer_sensory_pair_route(api):
+    status, body, _ = request(
+        api,
+        "POST",
+        "/optimizer/sensory-pair/",
+        {
+            "item_a": {
+                "modality": "visual",
+                "description": "red square",
+                "focus_duration": 0.8,
+            },
+            "item_b": {
+                "modality": "auditory",
+                "description": "low tone",
+                "focus_duration": 1.2,
+            },
+            "capture_delay_seconds": 4.5,
+        },
+    )
+    assert status == 200
+    assert body["status"] == "anchored"
+    anchor_title = body["concept"]["concept"]
+    assert body["concept"]["category"] == "Sensory Synthesis"
+
+    status, network, _ = request(api, "GET", "/network/")
+    assert status == 200
+    anchored = [item for item in network["network"] if item["concept"] == anchor_title]
+    assert len(anchored) == 1
+    assert "description" in anchored[0]
+
+    status, found, _ = request(api, "GET", "/concepts/search/?q=cross-modal")
+    assert status == 200
+    assert any(item["concept"] == anchor_title for item in found["results"])
+
+    status, discarded, _ = request(
+        api,
+        "POST",
+        "/optimizer/sensory-pair/",
+        {
+            "item_a": {"modality": "visual", "description": "blue circle"},
+            "item_b": {"modality": "tactile", "description": "rough surface"},
+            "capture_delay_seconds": 5.5,
+        },
+    )
+    assert status == 200
+    assert discarded["status"] == "discarded"
+    assert discarded["concept"] is None
+
+    status, health, _ = request(api, "GET", "/health/")
+    assert health["optimizer"]["counters"]["anchored"] == 1
+    assert health["optimizer"]["counters"]["discarded"] == 1
+
+
+def test_optimizer_route_validation(api):
+    status, body, _ = request(
+        api, "POST", "/optimizer/run/", {"intent": "", "trigger_signal": "x"}
+    )
+    assert status == 422
+    assert "detail" in body
+
+    status, _, _ = request(
+        api,
+        "POST",
+        "/optimizer/sensory-pair/",
+        {
+            "item_a": {"modality": "visual", "description": "a"},
+            "item_b": {"modality": "auditory", "description": "b"},
+            "capture_delay_seconds": -1,
+        },
+    )
+    assert status == 422
 
 
 def test_concept_lifecycle_matches_fastapi_behavior(api):

@@ -20,8 +20,10 @@ from typing import Callable, Iterable, Sequence
 import numpy as np
 
 try:  # Support both ``uvicorn backend.main:app`` and direct script execution.
+    from .cognitive_optimizer import IntegratedIACTSystem
     from .multilingual import normalize_text
 except ImportError:  # pragma: no cover - fallback for flat imports
+    from cognitive_optimizer import IntegratedIACTSystem  # type: ignore
     from multilingual import normalize_text  # type: ignore
 
 MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -114,6 +116,10 @@ class MultiLingualIACTEngine:
         self._concept_vectors: np.ndarray | None = None
         self._concept_version: int | None = None
         self._concept_lock = Lock()
+
+        # CECANP-0.54 / IACT-5SCP integration.  Servers replace this default
+        # instance with one whose concept_writer points at the shared store.
+        self.optimizer = IntegratedIACTSystem()
 
     # ------------------------------------------------------------------ setup
     def _get_encoder(self) -> Encoder:
@@ -266,6 +272,18 @@ class MultiLingualIACTEngine:
                 ],
             }
         )
+
+        # CECANP-0.54: feed the resolved route through the optimiser so
+        # repeated commands move from full load (1.00) to cached mode (0.54).
+        optimizer_intent = base["intent"] or f"unresolved:{normalized}"
+        try:
+            base["optimizer"] = self.optimizer.run_optimizer(
+                intent=optimizer_intent,
+                trigger_signal=command,
+                path_steps=("semantic_match", "action_dispatch"),
+            )
+        except Exception as exc:  # the optimiser must never break commands
+            base["optimizer"] = {"status": "error", "message": str(exc)}
         return base
 
     # ------------------------------------------------------- cognitive search

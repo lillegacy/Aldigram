@@ -57,6 +57,7 @@ def concept_document_text(concept: dict) -> str:
         title,
         title,
         str(concept.get("category", "")),
+        str(concept.get("description", "")),
         " ".join(str(keyword) for keyword in concept.get("keywords") or []),
     ]
     links = [str(link) for link in concept.get("links") or []]

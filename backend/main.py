@@ -9,6 +9,11 @@ DELETE /concepts/{title} remove a concept
 GET  /concepts/search/   lightweight concept search
 GET  /intents/           registered semantic intents
 POST /commands/          multilingual command -> intent -> action
+POST /search/            semantic search over concepts and links
+POST /api/search/        cognitive search (spec response shape)
+POST /qa/                question answering over the network
+POST /optimizer/run/     CECANP-0.54 route load tracking
+POST /optimizer/sensory-pair/  IACT-5SCP sensory synthesis + anchoring
 
 The command endpoint is powered by :class:`MultiLingualIACTEngine`, which uses
 ``sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`` to place
@@ -29,6 +34,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from .cognitive_optimizer import (
+    IntegratedIACTSystem,
+    SensoryInput,
+    repetition_threshold_from_env,
+)
 from .cognitive_search import CognitiveSearchEngine
 from .iact_engine import MODEL_NAME, MultiLingualIACTEngine
 from .intents import ACTION_MAP, CLARIFY_ACTION, build_engine
@@ -79,6 +89,37 @@ class QAIn(BaseModel):
     min_score: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class OptimizerRunIn(BaseModel):
+    """CECANP-0.54 route optimisation request."""
+
+    intent: str = Field(min_length=1, max_length=200)
+    trigger_signal: str = Field(min_length=1, max_length=500)
+    path_steps: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("path_steps", mode="before")
+    @classmethod
+    def _coerce_path_steps(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raise ValueError("path_steps must be a list of strings")
+        return [str(step).strip()[:200] for step in value if str(step).strip()]
+
+
+class SensoryItemIn(BaseModel):
+    modality: str = Field(min_length=1, max_length=60)
+    description: str = Field(min_length=1, max_length=500)
+    focus_duration: float = Field(default=0.0, ge=0.0, le=3600.0)
+
+
+class SensoryPairIn(BaseModel):
+    """IACT-5SCP cross-modal sensory pair request."""
+
+    item_a: SensoryItemIn
+    item_b: SensoryItemIn
+    capture_delay_seconds: float = Field(ge=0.0, le=3600.0)
+
+
 # ---------------------------------------------------------------------------
 # Application state / startup
 # ---------------------------------------------------------------------------
@@ -86,6 +127,10 @@ class AppState:
     def __init__(self) -> None:
         self.store = ConceptStore(
             data_file=os.environ.get("IACT_DATA_FILE", "iact_data.json")
+        )
+        self.optimizer = IntegratedIACTSystem(
+            concept_writer=self.store.upsert,
+            repetition_threshold=repetition_threshold_from_env(),
         )
         self.engine: MultiLingualIACTEngine | None = None
         self.search_engine: CognitiveSearchEngine | None = None
@@ -112,6 +157,7 @@ async def lifespan(_: FastAPI):
     try:
         state.engine = build_engine()
         state.engine.concept_provider = state.store.snapshot
+        state.engine.optimizer = state.optimizer
         state.search_engine = CognitiveSearchEngine(state.engine)
         logger.info(
             "IACT semantic engine ready (%d intents) + cognitive search",
@@ -167,17 +213,24 @@ def root():
             "/search/",
             "/api/search/",
             "/qa/",
+            "/optimizer/run/",
+            "/optimizer/sensory-pair/",
         ],
     }
 
 
 @app.get("/health/")
 def health() -> dict:
+    optimizer = state.optimizer.telemetry()
     return {
         "status": "ok",
         "concepts": len(state.store),
         "data_file": state.store.data_file,
         "load_error": state.load_error,
+        "compute_load": optimizer["compute_load"],
+        "associative_bandwidth": optimizer["associative_bandwidth"],
+        "cached_routes": optimizer["cached_routes"],
+        "optimizer": optimizer,
         "engine": {
             "ready": state.engine is not None,
             "error": state.engine_error,
@@ -267,6 +320,38 @@ def _require_search() -> CognitiveSearchEngine:
             or "cognitive search engine is not initialized; install backend requirements",
         )
     return state.search_engine
+
+
+@app.post("/optimizer/run/")
+def optimizer_run(payload: OptimizerRunIn) -> dict:
+    """Track a command route through the CECANP-0.54 optimiser."""
+    try:
+        return state.optimizer.run_optimizer(
+            payload.intent, payload.trigger_signal, payload.path_steps
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/optimizer/sensory-pair/")
+def optimizer_sensory_pair(payload: SensoryPairIn) -> dict:
+    """Synthesise a sensory pair inside the IACT-5SCP five-second window."""
+    try:
+        item_a = SensoryInput(
+            payload.item_a.modality,
+            payload.item_a.description,
+            payload.item_a.focus_duration,
+        )
+        item_b = SensoryInput(
+            payload.item_b.modality,
+            payload.item_b.description,
+            payload.item_b.focus_duration,
+        )
+        return state.optimizer.synthesize_sensory_pair(
+            item_a, item_b, payload.capture_delay_seconds
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/search/")
